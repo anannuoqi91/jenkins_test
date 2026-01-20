@@ -1,0 +1,22 @@
+services:
+  jenkins:
+    build: .
+    container_name: jenkins
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"   # inbound agent 用
+    environment:
+      - TZ=Asia/Shanghai
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+      - CASC_JENKINS_CONFIG=/var/jenkins_home/casc
+      # 管理员密码等敏感信息不要进仓库，走环境变量/secret 注入
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    volumes:
+      # Jenkins 数据持久化（jobs、builds、credentials、配置等）
+      - jenkins_home:/var/jenkins_home
+      # JCasC 配置以“代码”为准（建议只读）
+      - ./casc:/var/jenkins_home/casc:ro
+
+volumes:
+  jenkins_home:

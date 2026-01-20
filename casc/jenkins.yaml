@@ -1,0 +1,15 @@
+jenkins:
+  systemMessage: "Jenkins is managed by code (Docker Compose + JCasC)"
+  numExecutors: 0
+  mode: NORMAL
+
+securityRealm:
+  local:
+    allowsSignup: false
+    users:
+      - id: "admin"
+        password: "${ADMIN_PASSWORD}"
+
+authorizationStrategy:
+  loggedInUsersCanDoAnything:
+    allowAnonymousRead: false
