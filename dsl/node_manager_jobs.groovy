@@ -594,7 +594,7 @@ pipeline {
 // 5) Node_Operation
 // =========================
 pipelineJob('NodeManager/Node_Operation') {
-  description('Reserve / Release managed nodes')
+  description('Reserve / Release / Status for managed nodes')
 
   parameters {
     activeChoiceParam('NODE_NAME') {
@@ -622,7 +622,7 @@ return names ?: ['<No managed nodes>']
     }
 
     activeChoiceReactiveReferenceParam('NODE_INFO') {
-      description('节点基本信息')
+      description('节点状态预览（只读）')
       choiceType('FORMATTED_HTML')
       referencedParameter('NODE_NAME')
       groovyScript {
@@ -634,40 +634,98 @@ def esc = { s ->
 }
 
 if (!NODE_NAME || NODE_NAME.startsWith('<')) {
-  return "<div style='padding:8px;color:#666;'>未选择有效节点</div>"
+  return "<div style='padding:8px;color:#666;'>请选择一个有效节点</div>"
 }
 
-def file = new File(Jenkins.get().getRootDir(), "node-manager-meta/${NODE_NAME}.properties")
+def j = Jenkins.get()
+def file = new File(j.getRootDir(), "node-manager-meta/${NODE_NAME}.properties")
 if (!file.exists()) {
-  return "<div style='padding:8px;color:#c00;'>未找到节点元数据</div>"
+  return "<div style='padding:8px;color:#c00;'>未找到节点元数据：${esc(NODE_NAME)}</div>"
 }
 
 def p = new Properties()
 file.withInputStream { p.load(it) }
 
+def computer = j.getComputer(NODE_NAME)
+
 def ip = esc(p.getProperty('ip'))
 def systemType = esc(p.getProperty('systemType'))
 def labels = esc(p.getProperty('labels'))
 def osId = esc(p.getProperty('osId'))
+def osVer = esc(p.getProperty('osVer'))
 def arch = esc(p.getProperty('arch'))
+def remoteFs = esc(p.getProperty('remoteFs'))
+def executors = esc(p.getProperty('executors'))
+def credentialId = esc(p.getProperty('credentialId'))
+
+def reserved = (p.getProperty('reserved') ?: 'false').toBoolean()
+def reservedBy = esc(p.getProperty('reservedBy'))
+def reserveReason = esc(p.getProperty('reserveReason'))
+
+long reservedAt = 0L
+long reservedUntil = 0L
+try { reservedAt = (p.getProperty('reservedAtEpoch') ?: '0') as long } catch (ignored) {}
+try { reservedUntil = (p.getProperty('reservedUntilEpoch') ?: '0') as long } catch (ignored) {}
+
+def now = System.currentTimeMillis()
+def statusText = reserved ? '锁定' : '空闲'
+def remainText = '-'
+def reservedAtText = '-'
+def reservedUntilText = '-'
+
+if (reservedAt > 0L) {
+  reservedAtText = new Date(reservedAt).toString()
+}
+if (reservedUntil > 0L) {
+  reservedUntilText = new Date(reservedUntil).toString()
+  long remainMs = reservedUntil - now
+  if (remainMs > 0) {
+    long mins = Math.ceil(remainMs / 60000.0d) as long
+    remainText = mins + " 分钟"
+  } else {
+    remainText = "已到期，等待同步释放"
+  }
+}
+
+def onlineText = computer == null ? '未注册' : String.valueOf(computer.isOnline())
+def offlineText = computer == null ? '-' : String.valueOf(computer.isOffline())
+def tempOfflineText = computer == null ? '-' : String.valueOf(computer.isTemporarilyOffline())
+def offlineCauseText = computer == null ? 'computer 不存在' : esc(computer.getOfflineCauseReason())
+
+def statusBg = reserved ? '#fff3cd' : '#eefaf0'
 
 return """
-<div style="display:grid;grid-template-columns:120px 1fr;gap:8px;max-width:680px;padding:8px 0;">
+<div style="display:grid;grid-template-columns:140px 1fr;gap:8px;max-width:760px;padding:8px 0;">
+  <label>节点名称</label><input type="text" value="${esc(NODE_NAME)}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
   <label>IP</label><input type="text" value="${ip}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
   <label>系统类型</label><input type="text" value="${systemType}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
   <label>OS</label><input type="text" value="${osId}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>OS版本</label><input type="text" value="${osVer}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
   <label>架构</label><input type="text" value="${arch}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
   <label>标签</label><input type="text" value="${labels}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>REMOTE_FS</label><input type="text" value="${remoteFs}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>Executors</label><input type="text" value="${executors}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>Credential ID</label><input type="text" value="${credentialId}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>当前状态</label><input type="text" value="${statusText}" disabled style="background:${statusBg};color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>锁定用户</label><input type="text" value="${reservedBy ?: '-'}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>锁定原因</label><input type="text" value="${reserveReason ?: '-'}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>锁定开始时间</label><input type="text" value="${reservedAtText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>锁定到期时间</label><input type="text" value="${reservedUntilText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>剩余锁定时长</label><input type="text" value="${remainText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>Computer Online</label><input type="text" value="${onlineText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>Computer Offline</label><input type="text" value="${offlineText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>Temp Offline</label><input type="text" value="${tempOfflineText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>Offline Cause</label><input type="text" value="${offlineCauseText}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
 </div>
 """
 '''.stripIndent())
-        fallbackScript('return "<div style=\\"color:#c00;\\">加载节点信息失败</div>"')
+        fallbackScript('return "<div style=\\"color:#c00;\\">加载节点状态失败</div>"')
       }
     }
 
-    choiceParam('ACTION', ['Reserve', 'Release'], '操作类型')
-    stringParam('DURATION_MINUTES', '60', 'Reserve=锁定时长（分钟）；Release=延迟解锁分钟数（0=立即解锁）')
-    textParam('REASON', '', '备注/原因')
+    choiceParam('ACTION', ['Reserve', 'Release', 'Status'], '操作类型')
+    stringParam('DURATION_MINUTES', '60', 'Reserve 时表示锁定时长（分钟）；Release / Status 时可忽略')
+    textParam('REASON', '', '备注')
   }
 
   definition {
@@ -724,11 +782,11 @@ pipeline {
           if (!params.NODE_NAME?.trim() || params.NODE_NAME.startsWith('<')) {
             error('请选择有效节点')
           }
-          if (!(params.DURATION_MINUTES ==~ /\\d+/)) {
-            error('DURATION_MINUTES 必须是非负整数')
+          if (!['Reserve', 'Release', 'Status'].contains(params.ACTION)) {
+            error('ACTION 只能是 Reserve / Release / Status')
           }
-          if (!['Reserve', 'Release'].contains(params.ACTION)) {
-            error('ACTION 只能是 Reserve 或 Release')
+          if (params.ACTION == 'Reserve' && !(params.DURATION_MINUTES ==~ /\\d+/)) {
+            error('Reserve 时 DURATION_MINUTES 必须是非负整数')
           }
         }
       }
@@ -746,45 +804,89 @@ pipeline {
           }
 
           long now = System.currentTimeMillis()
-          long minutes = (params.DURATION_MINUTES ?: '0') as long
+
+          if (params.ACTION == 'Status') {
+            boolean reserved = (meta.reserved ?: 'false').toBoolean()
+            long reservedAt = 0L
+            long reservedUntil = 0L
+            try { reservedAt = (meta.reservedAtEpoch ?: '0') as long } catch (ignored) {}
+            try { reservedUntil = (meta.reservedUntilEpoch ?: '0') as long } catch (ignored) {}
+
+            def statusText = reserved ? '锁定' : '空闲'
+            def reservedBy = meta.reservedBy ?: ''
+            def reserveReason = meta.reserveReason ?: ''
+            def remainText = '-'
+
+            if (reserved && reservedUntil > 0L) {
+              long remainMs = reservedUntil - now
+              if (remainMs > 0) {
+                long mins = Math.ceil(remainMs / 60000.0d) as long
+                remainText = mins + ' 分钟'
+              } else {
+                remainText = '已到期，等待同步释放'
+              }
+            }
+
+            echo '================ NODE STATUS ================'
+            echo "NODE_NAME          : ${nodeName}"
+            echo "IP                 : ${meta.ip ?: ''}"
+            echo "SYSTEM_TYPE        : ${meta.systemType ?: ''}"
+            echo "OS_ID              : ${meta.osId ?: ''}"
+            echo "OS_VER             : ${meta.osVer ?: ''}"
+            echo "ARCH               : ${meta.arch ?: ''}"
+            echo "LABELS             : ${meta.labels ?: ''}"
+            echo "CREDENTIAL_ID      : ${meta.credentialId ?: ''}"
+            echo "REMOTE_FS          : ${meta.remoteFs ?: ''}"
+            echo "EXECUTORS          : ${meta.executors ?: ''}"
+            echo "CURRENT_STATUS     : ${statusText}"
+            echo "RESERVED_BY        : ${reservedBy ?: '-'}"
+            echo "RESERVE_REASON     : ${reserveReason ?: '-'}"
+            echo "RESERVED_AT        : ${reservedAt > 0 ? new Date(reservedAt).toString() : '-'}"
+            echo "RESERVED_UNTIL     : ${reservedUntil > 0 ? new Date(reservedUntil).toString() : '-'}"
+            echo "REMAINING_DURATION : ${remainText}"
+            echo "COMPUTER_ONLINE    : ${computer.isOnline()}"
+            echo "COMPUTER_OFFLINE   : ${computer.isOffline()}"
+            echo "TEMP_OFFLINE       : ${computer.isTemporarilyOffline()}"
+            echo "OFFLINE_CAUSE      : ${computer.getOfflineCauseReason()}"
+            echo '============================================='
+            return
+          }
 
           if (params.ACTION == 'Reserve') {
-            if (minutes <= 0) {
+            long minutes = (params.DURATION_MINUTES ?: '0') as long
+            if (minutes <= 0L) {
               error('Reserve 时 DURATION_MINUTES 必须大于 0')
             }
 
             long reservedUntil = now + minutes * 60_000L
+            def currentUserId = currentBuild.rawBuild.getCause(hudson.model.Cause.UserIdCause)?.userId ?: 'unknown'
             def cause = new OfflineCause.UserCause(User.current(), "Reserved by Node_Operation: ${params.REASON ?: 'no reason'}")
 
             computer.setTemporarilyOffline(true, cause)
 
             meta.reserved = 'true'
+            meta.reservedAtEpoch = String.valueOf(now)
             meta.reservedUntilEpoch = String.valueOf(reservedUntil)
+            meta.reservedBy = currentUserId
             meta.reserveReason = params.REASON ?: ''
             saveNodeMeta(nodeName, meta)
 
-            echo "Node ${nodeName} reserved until ${new Date(reservedUntil)}"
-          } else {
-            if (minutes == 0L) {
-              computer.setTemporarilyOffline(false, null)
+            echo "Node ${nodeName} reserved until ${new Date(reservedUntil)} by ${currentUserId}"
+            return
+          }
 
-              meta.reserved = 'false'
-              meta.reservedUntilEpoch = '0'
-              meta.reserveReason = ''
-              saveNodeMeta(nodeName, meta)
+          if (params.ACTION == 'Release') {
+            computer.setTemporarilyOffline(false, null)
 
-              echo "Node ${nodeName} released immediately"
-            } else {
-              long releaseAt = now + minutes * 60_000L
+            meta.reserved = 'false'
+            meta.reservedAtEpoch = '0'
+            meta.reservedUntilEpoch = '0'
+            meta.reservedBy = ''
+            meta.reserveReason = ''
+            saveNodeMeta(nodeName, meta)
 
-              // 保持当前离线状态，交给 Node_Status_Sync 到点释放
-              meta.reserved = 'true'
-              meta.reservedUntilEpoch = String.valueOf(releaseAt)
-              meta.reserveReason = "scheduled release: ${params.REASON ?: ''}"
-              saveNodeMeta(nodeName, meta)
-
-              echo "Node ${nodeName} will be released at ${new Date(releaseAt)}"
-            }
+            echo "Node ${nodeName} released immediately"
+            return
           }
         }
       }
