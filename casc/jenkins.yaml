@@ -1,6 +1,6 @@
 jenkins:
   systemMessage: "Jenkins managed by Docker Compose + JCasC"
-  numExecutors: 0
+  numExecutors: 1
   mode: NORMAL
   disableRememberMe: false
 

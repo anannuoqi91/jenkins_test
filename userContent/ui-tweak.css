@@ -1,0 +1,53 @@
+/* ====== 1) 隐藏红框：系统消息 + 描述块 + Edit description ====== */
+
+/* Jenkins systemMessage（常见 id） */
+#system-message,
+#systemMessage,
+.system-message,
+.jenkins-system-message {
+    display: none !important;
+}
+
+/* View / Job 的 description 区域（不同版本 selector 不同，做多路兜底） */
+#description,
+#description-container,
+.jenkins-description,
+.jenkins-app-bar__description,
+.jenkins-app-bar__subtitle {
+    display: none !important;
+}
+
+/* 右侧 "Edit description" 按钮（多路兜底） */
+a[href*="editDescription"],
+button[title="Edit description"],
+button[aria-label="Edit description"],
+.jenkins-edit-description,
+.jenkins-button--edit-description {
+    display: none !important;
+}
+
+/* ====== 2) 紫框：View tabs 移到顶部并固定 ====== */
+
+/* 常见 View tabs 容器 id/class（不同 Jenkins/主题会不一样，做多路兜底） */
+#viewList,
+.jenkins-view-tabs,
+.tabBar,
+.jenkins-tabs {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+}
+
+/* 让 tabs 在页面顶部“贴顶”显示（top 值可能需要微调：48~64px） */
+#viewList,
+.jenkins-view-tabs {
+    position: sticky !important;
+    top: 52px !important;
+    z-index: 1000 !important;
+    background: #fff !important;
+}
+
+/* 去掉 tabs 上方多余空白（兜底） */
+#page-body,
+#main-panel {
+    padding-top: 0 !important;
+}

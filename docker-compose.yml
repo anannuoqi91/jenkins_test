@@ -16,6 +16,9 @@ services:
     volumes:
       - jenkins_home:/var/jenkins_home
       - ./casc/jenkins.yaml:/casc/jenkins.yaml:ro
+      - ./dsl:/var/jenkins_home/workspace/seed/dsl:ro
+      - ./init.groovy.d:/var/jenkins_home/init.groovy.d:ro
+      - ./userContent/ui-tweak.css:/var/jenkins_home/userContent/ui-tweak.css:ro
 
 volumes:
   jenkins_home:
