@@ -121,8 +121,39 @@ def upsertSshNode(String nodeName,
   j.save()
 }
 
+@NonCPS
+File metaDir() {
+  def d = new File(Jenkins.get().getRootDir(), "node-manager-meta")
+  if (!d.exists()) {
+    d.mkdirs()
+  }
+  return d
+}
+
+@NonCPS
+Map loadNodeMeta(String nodeName) {
+  def f = new File(metaDir(), "${nodeName}.properties")
+  def p = new Properties()
+  if (f.exists()) {
+    f.withInputStream { p.load(it) }
+  }
+  def m = [:]
+  p.each { k, v -> m[k.toString()] = v?.toString() ?: '' }
+  return m
+}
+
+@NonCPS
+void saveNodeMeta(String nodeName, Map meta) {
+  def f = new File(metaDir(), "${nodeName}.properties")
+  def p = new Properties()
+  meta.each { k, v ->
+    p.setProperty(k.toString(), v == null ? '' : v.toString())
+  }
+  f.withOutputStream { p.store(it, "Managed by NodeManager") }
+}
+
 pipeline {
-  agent any
+  agent { label 'built-in' }
 
   options {
     disableConcurrentBuilds()
@@ -408,6 +439,33 @@ ${params.DESCRIPTION ?: ''}
       }
     }
 
+    stage('Persist Node Metadata') {
+        steps {
+            script {
+                def existing = loadNodeMeta(params.NODE_NAME)
+
+                saveNodeMeta(params.NODE_NAME, existing + [
+                    nodeName           : params.NODE_NAME,
+                    ip                 : params.NODE_IP,
+                    sshPort            : params.SSH_PORT,
+                    rootUser           : params.ROOT_USER,
+                    systemType         : params.SYSTEM_TYPE,
+                    remoteFs           : params.REMOTE_FS,
+                    executors          : params.EXECUTORS,
+                    labels             : env.EFFECTIVE_LABELS ?: '',
+                    credentialId       : env.NODE_CRED_ID ?: '',
+                    osId               : env.DETECTED_OS_ID ?: '',
+                    osVer              : env.DETECTED_OS_VER ?: '',
+                    arch               : env.DETECTED_ARCH ?: '',
+                    reserved           : existing.get('reserved') ?: 'false',
+                    reservedUntilEpoch : existing.get('reservedUntilEpoch') ?: '0',
+                    reserveReason      : existing.get('reserveReason') ?: '',
+                    managedBy          : 'NodeManager/AddNode'
+                ])
+            }
+        }
+    }
+
     stage('Verify Node Online') {
       steps {
         script {
@@ -446,89 +504,88 @@ ${params.DESCRIPTION ?: ''}
   }
 }
 
-// =========================
-// 2) Reserve_Node
-// =========================
-pipelineJob('NodeManager/Reserve_Node') {
-  description('Reserve node placeholder')
-
-  parameters {
-    stringParam('NODE_NAME', '', '要锁定的节点名称')
-    textParam('REASON', '', '锁定原因')
-  }
-
-  definition {
-    cps {
-      script('''
-pipeline {
-  agent any
-  stages {
-    stage('Reserve Node') {
-      steps {
-        echo "Reserve node: ${params.NODE_NAME}"
-        echo "Reason: ${params.REASON}"
-        echo "TODO: 在这里补充节点锁定逻辑"
-      }
-    }
-  }
-}
-'''.stripIndent())
-      sandbox()
-    }
-  }
-}
-
-// =========================
-// 3) Release_Node
-// =========================
-pipelineJob('NodeManager/Release_Node') {
-  description('Release node placeholder')
-
-  parameters {
-    stringParam('NODE_NAME', '', '要释放的节点名称')
-  }
-
-  definition {
-    cps {
-      script('''
-pipeline {
-  agent any
-  stages {
-    stage('Release Node') {
-      steps {
-        echo "Release node: ${params.NODE_NAME}"
-        echo "TODO: 在这里补充节点释放逻辑"
-      }
-    }
-  }
-}
-'''.stripIndent())
-      sandbox()
-    }
-  }
-}
 
 // =========================
 // 4) Node_Status_Sync
 // =========================
 pipelineJob('NodeManager/Node_Status_Sync') {
-  description('Node status sync placeholder')
+  description('Sync reserved node status and auto release expired reservations')
+
+  triggers {
+    cron('H/2 * * * *')
+  }
 
   definition {
     cps {
       script('''
+import jenkins.model.Jenkins
+
+@NonCPS
+File metaDir() {
+  def d = new File(Jenkins.get().getRootDir(), "node-manager-meta")
+  if (!d.exists()) {
+    d.mkdirs()
+  }
+  return d
+}
+
+@NonCPS
+Map loadNodeMetaByFile(File f) {
+  def p = new Properties()
+  f.withInputStream { p.load(it) }
+  def m = [:]
+  p.each { k, v -> m[k.toString()] = v?.toString() ?: '' }
+  return m
+}
+
+@NonCPS
+void saveNodeMeta(String nodeName, Map meta) {
+  def f = new File(metaDir(), "${nodeName}.properties")
+  def p = new Properties()
+  meta.each { k, v ->
+    p.setProperty(k.toString(), v == null ? '' : v.toString())
+  }
+  f.withOutputStream { p.store(it, "Managed by NodeManager") }
+}
+
 pipeline {
-  agent any
+  agent { label 'built-in' }
+
   stages {
-    stage('Sync Status') {
+    stage('Sync Reserved Nodes') {
       steps {
-        echo "TODO: 在这里补充节点状态同步逻辑"
+        script {
+          def now = System.currentTimeMillis()
+          def dir = metaDir()
+          def files = dir.listFiles()?.findAll { it.name.endsWith('.properties') } ?: []
+
+          files.each { f ->
+            def meta = loadNodeMetaByFile(f)
+            def nodeName = meta.nodeName ?: f.name.replaceFirst(/\\.properties$/, '')
+            def reserved = (meta.reserved ?: 'false').toBoolean()
+            def reservedUntil = (meta.reservedUntilEpoch ?: '0') as long
+
+            if (reserved && reservedUntil > 0 && now >= reservedUntil) {
+              def computer = Jenkins.get().getComputer(nodeName)
+              if (computer != null) {
+                computer.setTemporarilyOffline(false, null)
+                echo "Auto released node: ${nodeName}"
+              } else {
+                echo "Node not found during auto release: ${nodeName}"
+              }
+
+              meta.reserved = 'false'
+              meta.reservedUntilEpoch = '0'
+              meta.reserveReason = ''
+              saveNodeMeta(nodeName, meta)
+            }
+          }
+        }
       }
     }
   }
 }
 '''.stripIndent())
-      sandbox()
     }
   }
 }
@@ -537,30 +594,204 @@ pipeline {
 // 5) Node_Operation
 // =========================
 pipelineJob('NodeManager/Node_Operation') {
-  description('Node operation placeholder')
+  description('Reserve / Release managed nodes')
 
   parameters {
-    stringParam('NODE_NAME', '', '节点名称')
-    choiceParam('ACTION', ['noop', 'reconnect', 'disconnect'], '操作类型')
+    activeChoiceParam('NODE_NAME') {
+      description('节点名称')
+      choiceType('SINGLE_SELECT')
+      filterable()
+      groovyScript {
+        script('''
+import jenkins.model.Jenkins
+
+def dir = new File(Jenkins.get().getRootDir(), "node-manager-meta")
+if (!dir.exists()) {
+  return ['<No managed nodes>']
+}
+
+def names = dir.listFiles()
+  ?.findAll { it.name.endsWith('.properties') }
+  ?.collect { it.name.replaceFirst(/\\.properties$/, '') }
+  ?.sort()
+
+return names ?: ['<No managed nodes>']
+'''.stripIndent())
+        fallbackScript('return ["<ERROR>"]')
+      }
+    }
+
+    activeChoiceReactiveReferenceParam('NODE_INFO') {
+      description('节点基本信息')
+      choiceType('FORMATTED_HTML')
+      referencedParameter('NODE_NAME')
+      groovyScript {
+        script('''
+import jenkins.model.Jenkins
+
+def esc = { s ->
+  (s ?: '').replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
+}
+
+if (!NODE_NAME || NODE_NAME.startsWith('<')) {
+  return "<div style='padding:8px;color:#666;'>未选择有效节点</div>"
+}
+
+def file = new File(Jenkins.get().getRootDir(), "node-manager-meta/${NODE_NAME}.properties")
+if (!file.exists()) {
+  return "<div style='padding:8px;color:#c00;'>未找到节点元数据</div>"
+}
+
+def p = new Properties()
+file.withInputStream { p.load(it) }
+
+def ip = esc(p.getProperty('ip'))
+def systemType = esc(p.getProperty('systemType'))
+def labels = esc(p.getProperty('labels'))
+def osId = esc(p.getProperty('osId'))
+def arch = esc(p.getProperty('arch'))
+
+return """
+<div style="display:grid;grid-template-columns:120px 1fr;gap:8px;max-width:680px;padding:8px 0;">
+  <label>IP</label><input type="text" value="${ip}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>系统类型</label><input type="text" value="${systemType}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>OS</label><input type="text" value="${osId}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>架构</label><input type="text" value="${arch}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+  <label>标签</label><input type="text" value="${labels}" disabled style="background:#f5f5f5;color:#555;border:1px solid #ddd;padding:6px;" />
+</div>
+"""
+'''.stripIndent())
+        fallbackScript('return "<div style=\\"color:#c00;\\">加载节点信息失败</div>"')
+      }
+    }
+
+    choiceParam('ACTION', ['Reserve', 'Release'], '操作类型')
+    stringParam('DURATION_MINUTES', '60', 'Reserve=锁定时长（分钟）；Release=延迟解锁分钟数（0=立即解锁）')
+    textParam('REASON', '', '备注/原因')
   }
 
   definition {
     cps {
       script('''
+import jenkins.model.Jenkins
+import hudson.model.User
+import hudson.slaves.OfflineCause
+
+@NonCPS
+File metaDir() {
+  def d = new File(Jenkins.get().getRootDir(), "node-manager-meta")
+  if (!d.exists()) {
+    d.mkdirs()
+  }
+  return d
+}
+
+@NonCPS
+Map loadNodeMeta(String nodeName) {
+  def f = new File(metaDir(), "${nodeName}.properties")
+  if (!f.exists()) {
+    throw new RuntimeException("未找到节点元数据: ${nodeName}")
+  }
+  def p = new Properties()
+  f.withInputStream { p.load(it) }
+  def m = [:]
+  p.each { k, v -> m[k.toString()] = v?.toString() ?: '' }
+  return m
+}
+
+@NonCPS
+void saveNodeMeta(String nodeName, Map meta) {
+  def f = new File(metaDir(), "${nodeName}.properties")
+  def p = new Properties()
+  meta.each { k, v ->
+    p.setProperty(k.toString(), v == null ? '' : v.toString())
+  }
+  f.withOutputStream { p.store(it, "Managed by NodeManager") }
+}
+
 pipeline {
-  agent any
+  agent { label 'built-in' }
+
+  options {
+    disableConcurrentBuilds()
+    timeout(time: 15, unit: 'MINUTES')
+  }
+
   stages {
-    stage('Node Operation') {
+    stage('Validate Parameters') {
       steps {
-        echo "Node: ${params.NODE_NAME}"
-        echo "Action: ${params.ACTION}"
-        echo "TODO: 在这里补充节点操作逻辑"
+        script {
+          if (!params.NODE_NAME?.trim() || params.NODE_NAME.startsWith('<')) {
+            error('请选择有效节点')
+          }
+          if (!(params.DURATION_MINUTES ==~ /\\d+/)) {
+            error('DURATION_MINUTES 必须是非负整数')
+          }
+          if (!['Reserve', 'Release'].contains(params.ACTION)) {
+            error('ACTION 只能是 Reserve 或 Release')
+          }
+        }
+      }
+    }
+
+    stage('Execute Operation') {
+      steps {
+        script {
+          def nodeName = params.NODE_NAME
+          def meta = loadNodeMeta(nodeName)
+          def computer = Jenkins.get().getComputer(nodeName)
+
+          if (computer == null) {
+            error("节点不存在或未注册为 Jenkins node: ${nodeName}")
+          }
+
+          long now = System.currentTimeMillis()
+          long minutes = (params.DURATION_MINUTES ?: '0') as long
+
+          if (params.ACTION == 'Reserve') {
+            if (minutes <= 0) {
+              error('Reserve 时 DURATION_MINUTES 必须大于 0')
+            }
+
+            long reservedUntil = now + minutes * 60_000L
+            def cause = new OfflineCause.UserCause(User.current(), "Reserved by Node_Operation: ${params.REASON ?: 'no reason'}")
+
+            computer.setTemporarilyOffline(true, cause)
+
+            meta.reserved = 'true'
+            meta.reservedUntilEpoch = String.valueOf(reservedUntil)
+            meta.reserveReason = params.REASON ?: ''
+            saveNodeMeta(nodeName, meta)
+
+            echo "Node ${nodeName} reserved until ${new Date(reservedUntil)}"
+          } else {
+            if (minutes == 0L) {
+              computer.setTemporarilyOffline(false, null)
+
+              meta.reserved = 'false'
+              meta.reservedUntilEpoch = '0'
+              meta.reserveReason = ''
+              saveNodeMeta(nodeName, meta)
+
+              echo "Node ${nodeName} released immediately"
+            } else {
+              long releaseAt = now + minutes * 60_000L
+
+              // 保持当前离线状态，交给 Node_Status_Sync 到点释放
+              meta.reserved = 'true'
+              meta.reservedUntilEpoch = String.valueOf(releaseAt)
+              meta.reserveReason = "scheduled release: ${params.REASON ?: ''}"
+              saveNodeMeta(nodeName, meta)
+
+              echo "Node ${nodeName} will be released at ${new Date(releaseAt)}"
+            }
+          }
+        }
       }
     }
   }
 }
 '''.stripIndent())
-      sandbox()
     }
   }
 }

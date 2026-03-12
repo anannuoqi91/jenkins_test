@@ -14,3 +14,4 @@ monitoring
 cloudbees-folder
 simple-theme-plugin
 mask-passwords
+uno-choice
